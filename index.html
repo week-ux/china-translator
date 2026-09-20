@@ -9,12 +9,14 @@
     ── 도구 불러오기 (로컬 파일, 인터넷 불필요) ──────────────────
     pdf.js      → PDF 파일을 읽고 텍스트·이미지를 추출하는 도구
     jspdf       → 새 PDF 파일을 만들어 다운로드하는 도구
+    xlsx(SheetJS) → 엑셀 파일을 읽고 쓰는 도구
     이 파일들은 lib/ 폴더에 내려받아 함께 배포합니다.
     중국 현지처럼 인터넷이 불안정하거나 CDN이 막힌 환경에서도
     폴더째로 복사해서 열면 그대로 동작하도록 하기 위함입니다.
     ──────────────────────────────────────────────────────────── -->
   <script src="lib/pdf.min.js"></script>
   <script src="lib/jspdf.umd.min.js"></script>
+  <script src="lib/xlsx.full.min.js"></script>
   <script src="data/glossary.js"></script>
 
   <style>
@@ -311,13 +313,13 @@
 
 <!-- ── 단계 표시 바 (1·3·4는 클릭해서 왔다갔다 가능, 2는 처리 중 화면이라 직접 이동 대상 아님) ── -->
 <div class="steps" id="stepsBar">
-  <div class="step active" id="s1" onclick="goToStep(1)"><span class="step-num">1</span> PDF 업로드</div>
+  <div class="step active" id="s1" onclick="goToStep(1)"><span class="step-num">1</span> 파일 업로드</div>
   <span class="arrow">›</span>
   <div class="step" id="s2"><span class="step-num">2</span> 번역 처리</div>
   <span class="arrow">›</span>
   <div class="step" id="s3" onclick="goToStep(3)"><span class="step-num">3</span> 검토·수정</div>
   <span class="arrow">›</span>
-  <div class="step" id="s4" onclick="goToStep(4)"><span class="step-num">4</span> PDF 저장</div>
+  <div class="step" id="s4" onclick="goToStep(4)"><span class="step-num">4</span> 다운로드</div>
 </div>
 
 <div class="main">
@@ -326,14 +328,14 @@
   <div id="sec1">
     <div id="uploadZone" onclick="$('fileInput').click()">
       <div class="upload-icon">📄</div>
-      <div class="upload-title">작업지시서 PDF를 업로드하세요</div>
+      <div class="upload-title">작업지시서 PDF 또는 엑셀을 업로드하세요</div>
       <div class="upload-sub">
-        파일을 이 영역으로 드래그하거나 버튼을 클릭해서 선택하세요<br>
+        파일을 이 영역으로 드래그하거나 버튼을 클릭해서 선택하세요 (PDF · XLSX · XLS)<br>
         한국어 작업지시서를 자동으로 중국어 번역합니다
       </div>
       <button class="upload-btn" onclick="event.stopPropagation(); $('fileInput').click()">📂 파일 선택</button>
     </div>
-    <input type="file" id="fileInput" accept=".pdf" style="display:none" onchange="handleFile(event)">
+    <input type="file" id="fileInput" accept=".pdf,.xlsx,.xls" style="display:none" onchange="handleFile(event)">
   </div>
 
   <!-- ── 2단계: 번역 진행 중 ── -->
@@ -353,7 +355,11 @@
       <div class="editor-title">번역 검토 · 수정</div>
       <div class="actions">
         <button class="btn btn-gray"  onclick="window.print()">🖨 인쇄</button>
-        <button class="btn btn-green" onclick="makePDF()" id="pdfBtn">⬇ PDF 생성</button>
+        <select id="dlFormat" class="btn btn-gray" style="cursor:pointer">
+          <option value="pdf" selected>PDF로 생성</option>
+          <option value="excel">엑셀로 생성</option>
+        </select>
+        <button class="btn btn-green" onclick="generateOutput()" id="pdfBtn">⬇ 생성</button>
       </div>
     </div>
     <div class="file-info" id="fileInfo"></div>
@@ -379,8 +385,8 @@
   <div id="sec4" style="display:none">
     <div class="success-card">
       <div class="success-icon">✅</div>
-      <div class="success-title">PDF 생성 완료!</div>
-      <div class="success-sub">원본 이미지 보존 + 중국어 번역이 추가된 작업지시서가 준비됐어요</div>
+      <div class="success-title" id="successTitle">PDF 생성 완료!</div>
+      <div class="success-sub" id="successSub">원본 이미지 보존 + 중국어 번역이 추가된 작업지시서가 준비됐어요</div>
       <button class="dl-btn" id="dlBtn">⬇ PDF 다운로드</button>
       <span class="restart" onclick="reset()">← 새 파일 번역하기</span>
     </div>
@@ -397,7 +403,9 @@
   // ── 전역 데이터 ──────────────────────────────────────────────
   let sections = []; // 번역 항목 목록: [{ label, page, items:[{ko,zh,id,pdfX,pdfY,fontSize}] }]
   // 핵심: 각 item에 pdfX/pdfY/fontSize(PDF 좌표계)를 함께 저장해 나중에 인라인 위치를 알 수 있게 함
-  let curFile  = null;
+  let curFile     = null;
+  let curFileType = 'pdf'; // 'pdf' | 'excel' — 업로드된 파일 종류에 따라 검토·다운로드 방식이 갈림
+  let curWorkbook = null;  // 엑셀 업로드 시 원본 워크북(SheetJS) 보관 — "엑셀로 생성" 때 같은 셀에 번역을 채워 넣는 데 사용
   let itemId   = 0;
 
   // ── 실무 용어 사전 (엑셀 "중국실무단어장" 353개 + AI 보완 184개 = 총 537개) ──
@@ -458,15 +466,23 @@
   const zone = $('uploadZone');
   zone.addEventListener('dragover',  e => { e.preventDefault(); zone.classList.add('over'); });
   zone.addEventListener('dragleave', () => zone.classList.remove('over'));
+  const isSupportedFile = f => /\.(pdf|xlsx|xls)$/i.test(f?.name || '');
+
   zone.addEventListener('drop', e => {
     e.preventDefault();
     zone.classList.remove('over');
     const f = e.dataTransfer.files[0];
-    if (f?.type === 'application/pdf') processFile(f);
-    else toast('PDF 파일만 올릴 수 있어요');
+    if (isSupportedFile(f)) processFile(f);
+    else toast('PDF 또는 엑셀(xlsx/xls) 파일만 올릴 수 있어요');
   });
 
   function handleFile(e) { if (e.target.files[0]) processFile(e.target.files[0]); }
+
+  // 업로드된 파일 확장자로 PDF/엑셀 처리 경로를 나눈다
+  function processFile(file) {
+    if (/\.(xlsx|xls)$/i.test(file.name)) return processExcelFile(file);
+    return processPdfFile(file);
+  }
 
   // ── 단계 전환 ─────────────────────────────────────────────────
   function goStep(n) {
@@ -507,8 +523,9 @@
   // ── PDF 처리 메인 흐름 ────────────────────────────────────────
   // PDF.js의 content.items 에는 각 텍스트 조각의 위치(transform)가 들어있다.
   // 위치를 버리지 않고 rawItems 그대로 보관해 나중에 정확한 좌표를 사용한다.
-  async function processFile(file) {
+  async function processPdfFile(file) {
     curFile = file;
+    curFileType = 'pdf';
     mtUnreachable = false; // 새 문서마다 온라인 번역 가능 여부를 다시 판단
     mtConsecutiveFails = 0;
     step4Reached = false; // 새 문서는 아직 PDF를 생성한 적이 없으므로 4단계 이동을 다시 막음
@@ -542,6 +559,8 @@
       setProgress(100, '완료!', '', '');
       await sleep(400);
       renderEditor(file, sections); // 파일 통계(사전매칭 수 등) 계산용 — 표 자체는 화면에 안 보임
+      $('tableView').style.display = 'none';
+      $('pageView').style.display  = '';
       goStep(3);
       await renderPageView(); // 항상 페이지 보기로 시작
 
@@ -549,6 +568,77 @@
       toast('오류: ' + err.message);
       goStep(1);
     }
+  }
+
+  // ── 엑셀 처리 메인 흐름 ───────────────────────────────────────
+  // PDF와 달리 원본 좌표(pdfX/pdfY)가 없으므로 "페이지로 보기" 대신 기존 표 보기(renderEditor)를
+  // 그대로 검토 화면으로 쓴다. 시트 하나 = 섹션 하나, 셀 위치는 item.cellAddr로 기억해뒀다가
+  // "엑셀로 생성" 시 같은 셀에 번역을 채워 넣는 데 쓴다.
+  async function processExcelFile(file) {
+    curFile = file;
+    curFileType = 'excel';
+    curWorkbook = null;
+    mtUnreachable = false;
+    mtConsecutiveFails = 0;
+    step4Reached = false;
+    $('pageView').innerHTML = '';
+    goStep(2);
+    setProgress(10, '엑셀 분석 중...', '텍스트를 추출하고 있습니다', '');
+
+    try {
+      const buf = await file.arrayBuffer();
+      const wb  = XLSX.read(buf, { type: 'array' });
+      curWorkbook = wb;
+
+      setProgress(30, '텍스트 분석 중...', '시트를 구성하고 있습니다', '');
+      sections = parseWorkbook(wb);
+
+      const totalItems = sections.reduce((a, s) => a + s.items.length, 0);
+      if (totalItems === 0) {
+        toast('엑셀에서 번역할 한국어 텍스트를 찾지 못했어요');
+        goStep(1);
+        return;
+      }
+
+      setProgress(50, '중국어 번역 중...', `총 ${totalItems}개 항목`, '');
+      await translateAll(sections, done =>
+        setProgress(50 + (done/totalItems)*45, '중국어 번역 중...', `${done} / ${totalItems} 완료`, '')
+      );
+
+      setProgress(100, '완료!', '', '');
+      await sleep(400);
+      renderEditor(file, sections);
+      $('tableView').style.display = '';
+      $('pageView').style.display  = 'none';
+      goStep(3);
+
+    } catch (err) {
+      toast('오류: ' + err.message);
+      goStep(1);
+    }
+  }
+
+  // 시트별로 한글이 포함된 문자열 셀만 뽑아 섹션(=시트)/항목(=셀)으로 구성
+  function parseWorkbook(wb) {
+    const result = [];
+    wb.SheetNames.forEach((sheetName, idx) => {
+      const ws = wb.Sheets[sheetName];
+      if (!ws['!ref']) return;
+      const range = XLSX.utils.decode_range(ws['!ref']);
+      const items = [];
+      for (let r = range.s.r; r <= range.e.r; r++) {
+        for (let c = range.s.c; c <= range.e.c; c++) {
+          const addr = XLSX.utils.encode_cell({ r, c });
+          const cell = ws[addr];
+          if (!cell || (cell.t !== 's' && cell.t !== 'str') || !cell.v) continue;
+          const text = String(cell.v);
+          if (!isKorean(text)) continue;
+          items.push({ ko: text, zh: '', id: 'i' + itemId++, sheetName, cellAddr: addr });
+        }
+      }
+      if (items.length > 0) result.push({ label: sheetName, page: idx + 1, items });
+    });
+    return result;
   }
 
   // ── 텍스트 파싱 ───────────────────────────────────────────────
@@ -595,13 +685,18 @@
   function mergeFragmentedItems(rawItems) {
     const merged = [];
     const hasDigit = s => /\d/.test(s);
+    // 단위(cm/mm/kg/%...)가 붙은 숫자만 "라벨에 붙은 치수값"으로 보고 합친다.
+    // QC 시트의 기준/업체 값 칸처럼 단위 없이 숫자만 있는 경우는 표의 옆 칸일
+    // 가능성이 높으므로(칸이 좁아 라벨과 가까이 붙어도) 합치지 않는다.
+    const hasUnitNumber = s => /\d\s*(cm|mm|kg|g|%|㎝|㎜|℃|°)/i.test(s);
     for (const raw of rawItems) {
       if (!raw.str) { merged.push(raw); continue; }
       const [a, , , d, x, y] = raw.transform;
       const fontSize = Math.abs(d) || Math.abs(a) || 10;
       const prev = merged[merged.length - 1];
       const isWs = !raw.str.trim();
-      const guardOk = prev && prev.str && prev.str.trim() && !hasDigit(prev.str);
+      const rawOk = isWs || !hasDigit(raw.str) || hasUnitNumber(raw.str);
+      const guardOk = prev && prev.str && prev.str.trim() && !hasDigit(prev.str) && rawOk;
 
       if (guardOk) {
         const [pa, , , pd, px, py] = prev.transform;
@@ -1437,12 +1532,8 @@
   }
 
   // ── PDF 생성 ──────────────────────────────────────────────────
-  async function makePDF() {
-    const btn = $('pdfBtn');
-    btn.disabled = true; btn.textContent = '⏳ 생성 중...';
-    toast('PDF 렌더링 중... 잠시 기다려주세요');
-
-    try {
+  // PDF 업로드 → 원본 이미지 위에 번역 말풍선을 그린 PDF (기존 방식, 결과 blob만 반환)
+  async function buildPdfBubbleBlob() {
       const { jsPDF } = window.jspdf;
       const origPdf   = await pdfjsLib.getDocument({ data: await curFile.arrayBuffer() }).promise;
 
@@ -1526,7 +1617,124 @@
       }
 
       const blob  = doc.output('blob');
-      const fname = (curFile?.name||'translated').replace('.pdf','') + '_중국어번역.pdf';
+      const fname = (curFile?.name||'translated').replace(/\.pdf$/i,'') + '_중국어번역.pdf';
+      return { blob, fname };
+  }
+
+  // 엑셀 업로드 → 원본 워크북의 번역된 셀에 중국어를 같은 칸(줄바꿈으로 구분) 채워서 반환
+  function buildEnrichedWorkbookBlob() {
+    for (const sec of sections) {
+      const ws = curWorkbook.Sheets[sec.label];
+      if (!ws) continue;
+      for (const item of sec.items) {
+        if (!item.zh || !item.zh.trim() || !item.cellAddr) continue;
+        const cell = ws[item.cellAddr];
+        if (!cell) continue;
+        cell.v = cell.v + '\n' + item.zh;
+        cell.t = 's';
+        delete cell.w; // 캐시된 표시 텍스트 삭제 → 새 값으로 다시 계산되게 함
+      }
+    }
+    const out   = XLSX.write(curWorkbook, { type: 'array', bookType: 'xlsx' });
+    const blob  = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const fname = (curFile?.name||'translated').replace(/\.(xlsx|xls)$/i,'') + '_중국어번역.xlsx';
+    return { blob, fname };
+  }
+
+  // PDF 업로드인데 "엑셀로 생성"을 고른 경우 → 원본 레이아웃 없이, 번역 항목을 표로 정리한 엑셀
+  function buildExcelListBlob() {
+    const rows = [['섹션/페이지', '원문(한국어)', '번역(중국어)']];
+    for (const sec of sections)
+      for (const item of sec.items)
+        if (item.zh && item.zh.trim())
+          rows.push([`${sec.label} · 페이지 ${sec.page}`, item.ko, item.zh]);
+
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    ws['!cols'] = [{ wch: 24 }, { wch: 45 }, { wch: 45 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, '번역결과');
+
+    const out   = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
+    const blob  = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const fname = (curFile?.name||'translated').replace(/\.pdf$/i,'') + '_중국어번역.xlsx';
+    return { blob, fname };
+  }
+
+  // 엑셀 업로드인데 "PDF로 생성"을 고른 경우 → 원본 페이지 이미지가 없으므로
+  // 번역 항목을 원문/번역 나란히 나열한 간단한 목록 PDF를 만든다.
+  // 중국어 글자는 jsPDF 기본 폰트로는 안 그려지므로(한중일 글꼴 미포함),
+  // 기존 makePDF와 같은 방식으로 캔버스에 먼저 그린 뒤 이미지로 PDF에 삽입한다.
+  async function buildSimpleListPdfBlob() {
+    const { jsPDF } = window.jspdf;
+    const items = sections.flatMap(s => s.items.filter(i => i.zh && i.zh.trim()));
+
+    const W = 1600, ROW_H = 66, PAD = 24;
+    const canvas = document.createElement('canvas');
+    canvas.width  = W;
+    canvas.height = Math.max(200, PAD*2 + 56 + items.length * ROW_H);
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#111827'; ctx.font = 'bold 30px sans-serif';
+    ctx.fillText(curFile?.name || '번역 결과', PAD, PAD + 30);
+
+    let y = PAD + 70;
+    for (const item of items) {
+      ctx.font = '20px sans-serif';
+      ctx.fillStyle = '#374151'; ctx.fillText(item.ko, PAD, y);
+      ctx.fillStyle = '#1e40af'; ctx.fillText(item.zh, PAD, y + 28);
+      ctx.strokeStyle = '#e5e7eb'; ctx.beginPath();
+      ctx.moveTo(PAD, y + 42); ctx.lineTo(canvas.width - PAD, y + 42); ctx.stroke();
+      y += ROW_H;
+    }
+
+    const doc    = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+    const M      = 10;
+    const availW = doc.internal.pageSize.getWidth()  - M*2;
+    const availH = doc.internal.pageSize.getHeight() - M*2;
+    const scale    = availW / canvas.width;
+    const pageH_px = Math.floor(availH / scale);
+    let yOff = 0, first = true;
+
+    while (yOff < canvas.height) {
+      if (!first) doc.addPage();
+      first = false;
+      const chunkH = Math.min(pageH_px, canvas.height - yOff);
+      const chunk  = document.createElement('canvas');
+      chunk.width  = canvas.width;
+      chunk.height = chunkH;
+      chunk.getContext('2d').drawImage(canvas, 0, yOff, canvas.width, chunkH, 0, 0, canvas.width, chunkH);
+      doc.addImage(chunk.toDataURL('image/jpeg', 0.92), 'JPEG', M, M, availW, chunkH*scale);
+      yOff += pageH_px;
+    }
+
+    const blob  = doc.output('blob');
+    const fname = (curFile?.name||'translated').replace(/\.(xlsx|xls)$/i,'') + '_중국어번역.pdf';
+    return { blob, fname };
+  }
+
+  // ── 3단계 화면의 "생성" 버튼: 업로드 종류(pdf/excel) × 선택한 다운로드 형식(pdf/excel)
+  // 네 조합에 맞는 빌더를 골라 호출하고, 공통으로 다운로드 버튼 연결과 4단계 전환을 담당한다.
+  async function generateOutput() {
+    const btn    = $('pdfBtn');
+    const format = $('dlFormat').value; // 'pdf' | 'excel'
+    btn.disabled = true; btn.textContent = '⏳ 생성 중...';
+    toast('생성 중... 잠시 기다려주세요');
+
+    try {
+      let result;
+      if (format === 'excel') {
+        result = curFileType === 'excel' ? buildEnrichedWorkbookBlob() : buildExcelListBlob();
+      } else {
+        result = curFileType === 'excel' ? await buildSimpleListPdfBlob() : await buildPdfBubbleBlob();
+      }
+      const { blob, fname } = result;
+
+      $('successTitle').textContent = format === 'excel' ? '엑셀 생성 완료!' : 'PDF 생성 완료!';
+      $('successSub').textContent   = format === 'excel'
+        ? (curFileType === 'excel' ? '원본 엑셀 각 셀에 중국어 번역이 추가됐어요' : '번역 항목을 정리한 엑셀 파일이 준비됐어요')
+        : (curFileType === 'excel' ? '원문·번역을 나란히 정리한 PDF가 준비됐어요' : '원본 이미지 보존 + 중국어 번역이 추가된 작업지시서가 준비됐어요');
+      $('dlBtn').textContent = format === 'excel' ? '⬇ 엑셀 다운로드' : '⬇ PDF 다운로드';
+
       $('dlBtn').onclick = async () => {
         // claude.ai 아티팩트로 열린 경우: 샌드박스에서는 일반 <a download>가 동작하지 않으므로
         // downloads 캐패빌리티로 저장 (뷰어가 확인창을 띄우고 승인해야 저장됨)
@@ -1549,20 +1757,23 @@
       goStep(4);
 
     } catch (err) {
-      toast('PDF 생성 오류: ' + err.message);
+      toast('생성 오류: ' + err.message);
       console.error(err);
     } finally {
-      btn.disabled = false; btn.textContent = '⬇ PDF 생성';
+      btn.disabled = false; btn.textContent = '⬇ 생성';
     }
   }
 
   // ── 초기화 ────────────────────────────────────────────────────
   function reset() {
-    sections = []; curFile = null; itemId = 0;
+    sections = []; curFile = null; curFileType = 'pdf'; curWorkbook = null; itemId = 0;
     step4Reached = false;
     $('fileInput').value = '';
     $('tbl').innerHTML = '';
     $('pageView').innerHTML = '';
+    $('pageView').style.display = '';
+    $('tableView').style.display = 'none';
+    $('dlFormat').value = 'pdf';
     goStep(1);
   }
 
