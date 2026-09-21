@@ -127,11 +127,13 @@
     .bubble-wrap { position:absolute; }
     .bubble-wrap.dragging { z-index:10; }
     .drag-handle {
-      position:absolute; top:-9px; left:-9px; width:16px; height:16px; border-radius:50%;
-      background:#3b82f6; color:#fff; font-size:10px; line-height:1; display:flex;
+      position:absolute; top:-7px; left:-7px; width:11px; height:11px; border-radius:50%;
+      background:#3b82f6; color:#fff; font-size:7px; line-height:1; display:flex;
       align-items:center; justify-content:center; cursor:grab; user-select:none;
-      touch-action:none; z-index:6;
+      touch-action:none; z-index:6; opacity:.35; transition:opacity .15s;
     }
+    /* 평소엔 흐리게, 마우스를 가까이 가져가거나 드래그 중일 때만 또렷하게 — 표가 빽빽할 때 방해되지 않게 함 */
+    .bubble-wrap:hover .drag-handle, .drag-handle:active { opacity:1; }
     .drag-handle:active { cursor:grabbing; }
     .zh-overlay {
       position:absolute; inset:0; width:100%; height:100%;
@@ -1502,6 +1504,24 @@
   //   번역인지" 헷갈리는 문제가 있었음(사용자가 실제 표 스크린샷으로 확인해줌).
   //   대신 페이지로 보기에서 사용자가 직접 드래그로 옮길 수 있게 해서(item.dx/dy,
   //   PDF 좌표 단위 오프셋), 겹치는 게 거슬리는 특정 칸만 사용자가 골라서 옮기면 된다.
+  // 중국어는 띄어쓰기가 없는 경우가 많아 영어처럼 단어 단위로 줄바꿈할 수 없다 —
+  // 글자 단위로 폭을 재면서 maxW를 넘기 직전에 줄을 바꾼다 (한 글자는 무조건 넣음).
+  function wrapCjkText(measureCtx, text, maxW) {
+    const lines = [];
+    let cur = '';
+    for (const ch of text) {
+      const test = cur + ch;
+      if (cur && measureCtx.measureText(test).width > maxW) {
+        lines.push(cur);
+        cur = ch;
+      } else {
+        cur = test;
+      }
+    }
+    if (cur) lines.push(cur);
+    return lines;
+  }
+
   function layoutBubbles(items, viewport, measureCtx, SCALE) {
     return items.map(item => {
       const [px, py] = viewport.convertToViewportPoint(item.pdfX, item.pdfY);
@@ -1514,9 +1534,21 @@
       const zhW  = measureCtx.measureText(item.zh || '').width;
       const padX = 6, padY = 4;
 
+      // 번역이 원문보다 많이 길어지면(예: 짧은 라벨이 긴 설명으로 번역됨) 가로로 계속
+      // 넓어져 표의 옆 칸을 침범하게 된다 — 옆 칸으로 넘어가지 않도록 폭을 원문의
+      // 일정 배수로 제한하고, 그 안에서 줄바꿈해서 아래로(세로 여백) 키운다.
+      const maxTextW = Math.max(koW, zhSize * 3) * 1.8;
+      let zhLines = [item.zh || ''];
+      let lineW   = zhW;
+      if (zhW > maxTextW) {
+        zhLines = wrapCjkText(measureCtx, item.zh || '', maxTextW);
+        lineW   = Math.max(...zhLines.map(l => measureCtx.measureText(l).width));
+      }
+
+      const lineH = zhSize * 1.2;
       // 한국어 원문을 완전히 덮도록 더 넓은 쪽 기준으로 너비를 잡는다
-      const bW = Math.max(zhW, koW, 20) + padX * 2;
-      const bH = zhSize + padY * 2;
+      const bW = Math.max(lineW, koW, 20) + padX * 2;
+      const bH = zhLines.length * lineH + padY * 2;
 
       // 원래 한국어가 있던 그 자리에 그대로 겹쳐서 배치 (오른쪽/아래로 피하지 않음)
       // + 사용자가 드래그로 옮겨둔 오프셋(PDF 좌표 단위)이 있으면 그만큼 더해줌 —
@@ -1527,7 +1559,7 @@
 
       const rect = { x: bX, y: bY, w: bW, h: bH };
 
-      return { item, rect, zhSize, padX, padY };
+      return { item, rect, zhSize, padX, padY, zhLines, lineH };
     });
   }
 
@@ -1568,7 +1600,7 @@
           const ctx = canvas.getContext('2d');
           const laidOut = layoutBubbles(items, viewport, ctx, SCALE);
 
-          for (const { item, rect, zhSize, padX, padY } of laidOut) {
+          for (const { rect, zhSize, padX, padY, zhLines, lineH } of laidOut) {
             const r = 4; // 말풍선 모서리 반지름
 
             ctx.fillStyle = 'rgba(255, 255, 255, 0.96)';
@@ -1582,7 +1614,10 @@
 
             ctx.fillStyle = '#1e40af';
             ctx.font      = `${zhSize}px sans-serif`;
-            ctx.fillText(item.zh, rect.x + padX, rect.y + padY + zhSize * 0.82);
+            // 옆 칸 침범을 막기 위해 줄바꿈된 경우 여러 줄로 나눠서 그린다 (layoutBubbles 참고)
+            zhLines.forEach((line, i) => {
+              ctx.fillText(line, rect.x + padX, rect.y + padY + zhSize * 0.82 + i * lineH);
+            });
           }
         }
 
