@@ -729,17 +729,34 @@
     return merged;
   }
 
+  // 같은 줄에서 오른쪽으로 다음에 오는 조각까지의 거리(PDF 좌표 단위)를 찾는다.
+  // QC 시트처럼 표 칸이 촘촘한 문서에서, 번역이 원문보다 길어져도 이 값을 넘겨
+  // 옆 칸(치수값 등)을 가리지 않도록 말풍선 폭 상한으로 쓴다. 못 찾으면 undefined
+  // (줄의 마지막 항목이거나 표가 아닌 자유 배치 텍스트) → layoutBubbles가 대체 기준을 씀.
+  function findAvailWidth(rawItems, i, x, y, fontSize) {
+    for (let j = i + 1; j < rawItems.length; j++) {
+      const [, , , nd, nx, ny] = rawItems[j].transform;
+      const nFontSize = Math.abs(nd) || Math.abs(rawItems[j].transform[0]) || 10;
+      if (Math.abs(ny - y) > Math.max(fontSize, nFontSize) * 0.5) continue; // 다른 줄
+      if (nx <= x) continue; // 왼쪽/같은 위치는 건너뜀
+      return nx - x - 2;
+    }
+    return undefined;
+  }
+
   function groupLines(rawItems, pageNum) {
     rawItems = mergeFragmentedItems(rawItems);
     const result = [];
     let cur = { label: `페이지 ${pageNum}`, page: pageNum, items: [] };
 
-    for (const raw of rawItems) {
+    for (let i = 0; i < rawItems.length; i++) {
+      const raw = rawItems[i];
       const line = raw.str.trim();
       if (!line) continue; // 빈 줄만 건너뜀 — 저작권 문구 포함 모든 한글 번역
 
       const [, , , d, x, y] = raw.transform;
       const fontSize = Math.abs(d) || Math.abs(raw.transform[0]) || 10;
+      const availPdfW = findAvailWidth(rawItems, i, x, y, fontSize);
 
       // ── 섹션 헤더 판별 규칙 ──────────────────────────────────
       // 조건 1: 불릿(-/+/*)으로 시작하면 무조건 지시문 → 헤더 아님
@@ -754,10 +771,10 @@
         cur = { label: line, page: pageNum, items: [] };
         // 섹션 헤더 자체도 한글이면 번역 대상에 추가 (예: "후드", "어깨")
         if (isKorean(line))
-          cur.items.push({ ko: line, zh: '', id: 'i' + itemId++, pdfX: x, pdfY: y, fontSize });
+          cur.items.push({ ko: line, zh: '', id: 'i' + itemId++, pdfX: x, pdfY: y, fontSize, availPdfW });
       } else if (isKorean(line)) {
         // 한글 포함 → 길이/형태 무관하게 전부 번역 (저작권 문구, 짧은 낱말 포함)
-        cur.items.push({ ko: line, zh: '', id: 'i' + itemId++, pdfX: x, pdfY: y, fontSize });
+        cur.items.push({ ko: line, zh: '', id: 'i' + itemId++, pdfX: x, pdfY: y, fontSize, availPdfW });
       }
     }
     if (cur.items.length > 0) result.push(cur);
@@ -1535,9 +1552,13 @@
       const padX = 6, padY = 4;
 
       // 번역이 원문보다 많이 길어지면(예: 짧은 라벨이 긴 설명으로 번역됨) 가로로 계속
-      // 넓어져 표의 옆 칸을 침범하게 된다 — 옆 칸으로 넘어가지 않도록 폭을 원문의
-      // 일정 배수로 제한하고, 그 안에서 줄바꿈해서 아래로(세로 여백) 키운다.
-      const maxTextW = Math.max(koW, zhSize * 3) * 1.8;
+      // 넓어져 표의 옆 칸을 침범하게 된다 — 옆 칸으로 넘어가지 않도록 폭을 제한하고
+      // 그 안에서 줄바꿈해서 아래로(세로 여백) 키운다. 옆 칸까지의 실제 거리를 알면
+      // (availPdfW, groupLines에서 계산) 그걸 그대로 쓰고, 모르면(줄 끝 등) 원문 폭의
+      // 배수로 대략 추정한다.
+      const maxTextW = item.availPdfW !== undefined
+        ? Math.max(item.availPdfW * SCALE - padX * 2, zhSize * 2)
+        : Math.max(koW, zhSize * 3) * 1.8;
       let zhLines = [item.zh || ''];
       let lineW   = zhW;
       if (zhW > maxTextW) {
